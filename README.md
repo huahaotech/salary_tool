@@ -273,7 +273,7 @@ python create_installer.py
 ## 🏗️ 项目结构
 
 ```
-工资工具_v2.3/
+工资工具_v2.5/
 ├── 📄 salary_tool_feishu.py           # 主程序源码
 ├── 📄 create_installer.py             # 打包脚本
 ├── 📄 setup.iss                       # Inno Setup 脚本
@@ -293,8 +293,7 @@ python create_installer.py
         ├── 个税版式.xlsx
         ├── 莱商银行版式.txt
         ├── 济宁银行版式.txt          # ⭐新增
-        ├── 农业银行本行.csv
-        └── 农业银行跨行.csv
+        └── 农业银行版式.csv
 ```
 
 ---
@@ -338,7 +337,7 @@ python create_installer.py
 ## 📦 安装与卸载
 
 ### 安装
-1. 下载 `工资报表生成工具_v2.3_安装包.exe`
+1. 下载 `工资报表生成工具_v2.5_安装包.exe`
 2. 双击运行安装程序
 3. 选择安装目录（默认：Program Files）
 4. 可选创建桌面快捷方式
