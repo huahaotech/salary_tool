@@ -48,7 +48,7 @@ except:
 
 
 # 版本信息
-VERSION = "v2.3"
+VERSION = "v2.5"
 COPYRIGHT = "2026 惊鸿科技（济宁）有限公司"
 
 
@@ -251,6 +251,28 @@ class DatabaseManager:
         """删除员工"""
         conn = self.get_connection()
         cursor = conn.cursor()
+        
+        # 先获取员工信息
+        cursor.execute('''
+            SELECT id, name, id_card, phone, bank_card, interbank_code, bank_name
+            FROM employees WHERE id = ?
+        ''', (employee_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            # 记录删除操作
+            employee_data = {
+                'id': row['id'],
+                '姓名': row['name'],
+                '身份证号码': row['id_card'] or '',
+                '手机号': row['phone'] or '',
+                '银行卡号': row['bank_card'] or '',
+                '联行号': row['interbank_code'] or '',
+                '开户行': row['bank_name'] or ''
+            }
+            self.record_deleted_employee(employee_data, '数据库删除')
+        
+        # 执行删除
         cursor.execute('DELETE FROM employees WHERE id = ?', (employee_id,))
         conn.commit()
         conn.close()
@@ -260,6 +282,34 @@ class DatabaseManager:
         """根据姓名和身份证号删除员工（兼容旧版本）"""
         conn = self.get_connection()
         cursor = conn.cursor()
+        
+        # 先获取员工信息
+        if id_card:
+            cursor.execute('''
+                SELECT id, name, id_card, phone, bank_card, interbank_code, bank_name
+                FROM employees WHERE name = ? AND id_card = ?
+            ''', (name, id_card))
+        else:
+            cursor.execute('''
+                SELECT id, name, id_card, phone, bank_card, interbank_code, bank_name
+                FROM employees WHERE name = ?
+            ''', (name,))
+        rows = cursor.fetchall()
+        
+        # 记录所有匹配的员工
+        for row in rows:
+            employee_data = {
+                'id': row['id'],
+                '姓名': row['name'],
+                '身份证号码': row['id_card'] or '',
+                '手机号': row['phone'] or '',
+                '银行卡号': row['bank_card'] or '',
+                '联行号': row['interbank_code'] or '',
+                '开户行': row['bank_name'] or ''
+            }
+            self.record_deleted_employee(employee_data, '兼容模式删除')
+        
+        # 执行删除
         if id_card:
             cursor.execute('DELETE FROM employees WHERE name = ? AND id_card = ?', (name, id_card))
         else:
@@ -537,8 +587,8 @@ class DatabaseManager:
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     ''', (name, id_card, phone, bank_card, interbank_code, bank_name, datetime.now()))
                     imported += 1
-                except sqlite3.IntegrityError:
-                    pass
+                except sqlite3.IntegrityError as e:
+                    print(f"插入员工 {name} 失败: {e}")
 
         conn.commit()
         conn.close()
@@ -677,7 +727,7 @@ class DatabaseManager:
         for row in rows:
             try:
                 report_types = json.loads(row['report_types']) if row['report_types'] else []
-            except:
+            except json.JSONDecodeError:
                 report_types = []
             config[row['company_name']] = {'report_types': report_types}
         return config
@@ -713,7 +763,7 @@ class DatabaseManager:
         if row:
             try:
                 return json.loads(row['value'])
-            except:
+            except json.JSONDecodeError:
                 return row['value']
         return default
 
@@ -1100,8 +1150,8 @@ class SalaryTool:
         try:
             self.db.set_app_config('default_company', self.company_var.get())
             self.db.set_app_config('history', self.history[-10:])
-        except:
-            pass
+        except Exception as e:
+            print(f"保存配置失败: {e}")
 
     def load_company_config(self):
         """加载企业报表配置（从数据库）"""
@@ -2052,7 +2102,9 @@ class SalaryTool:
                 self.salary_input.insert("1.0", clipboard)
                 self.update_input_stats()
                 messagebox.showinfo("成功", "已粘贴剪贴板数据")
-        except:
+            else:
+                messagebox.showwarning("提示", "剪贴板中没有数据")
+        except tk.TclError:
             messagebox.showwarning("提示", "剪贴板中没有数据")
 
     def clear_input(self):
@@ -2577,7 +2629,7 @@ class SalaryTool:
             f.write('\n'.join(lines))
         return output_file
 
-    def generate_agricultural_version(self, data, company_name, salary_period, date_str, output_dir, generate_benhang=True, generate_kuahang=True):
+    def generate_agricultural_version(self, data, company_name, salary_period, date_str, output_dir):
         """生成农业银行批量转账版
 
         批量转账模板格式：
@@ -2671,7 +2723,11 @@ class SalaryTool:
     def add_history(self, company, period, count, total, files):
         """添加历史记录（使用数据库）"""
         time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        output_dir = files[0] if files else ''
+        # 处理files参数可能是字符串的情况
+        if isinstance(files, list) and files:
+            output_dir = files[0]
+        else:
+            output_dir = files
 
         # 保存到数据库
         self.db.add_history(time_str, company, period, count, total, output_dir)
@@ -4500,18 +4556,27 @@ class EmployeeDialog:
             return
 
         # 校验身份证格式
-        if len(id_card) != 18:
-            messagebox.showwarning("提示", "身份证号码必须为18位", parent=self.dialog)
+        is_valid, error_msg, _ = Validator.validate_id_card(id_card)
+        if not is_valid:
+            messagebox.showwarning("提示", f"身份证号码错误: {error_msg}", parent=self.dialog)
             return
 
         # 校验手机号格式
-        if not re.match(r'^1[3-9]\d{9}$', phone):
-            messagebox.showwarning("提示", "手机号格式不正确", parent=self.dialog)
+        is_valid, error_msg = Validator.validate_phone(phone)
+        if not is_valid:
+            messagebox.showwarning("提示", f"手机号错误: {error_msg}", parent=self.dialog)
+            return
+
+        # 校验银行卡号格式
+        is_valid, error_msg, _ = Validator.validate_bank_card(bank_card)
+        if not is_valid:
+            messagebox.showwarning("提示", f"银行卡号错误: {error_msg}", parent=self.dialog)
             return
 
         # 校验联行号格式
-        if len(interbank) != 12:
-            messagebox.showwarning("提示", "联行号必须为12位", parent=self.dialog)
+        is_valid, error_msg = Validator.validate_interbank_code(interbank)
+        if not is_valid:
+            messagebox.showwarning("提示", f"联行号错误: {error_msg}", parent=self.dialog)
             return
 
         if self.is_edit:

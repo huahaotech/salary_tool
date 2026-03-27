@@ -6,7 +6,7 @@
 
 ### 智能化工资管理解决方案
 
-[![版本](https://img.shields.io/badge/版本-v2.3-blue.svg)](https://github.com)
+[![版本](https://img.shields.io/badge/版本-v2.5-blue.svg)](https://github.com)
 [![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 [![平台](https://img.shields.io/badge/平台-Windows-lightgrey.svg)](https://microsoft.com)
 [![许可证](https://img.shields.io/badge/许可证-MIT-yellow.svg)](LICENSE)
@@ -84,7 +84,7 @@ python salary_tool_feishu.py
 
 ### 方式一：使用安装包（推荐）
 
-下载 `工资报表生成工具_v2.3_安装包.exe`，双击运行：
+下载 `工资报表生成工具_v2.5_安装包.exe`，双击运行：
 - 自动创建桌面快捷方式
 - 自动创建开始菜单快捷方式
 - 支持卸载功能
@@ -357,6 +357,15 @@ python create_installer.py
 ---
 
 ## 📝 更新日志
+
+### v2.5 (2026-03-27)
+- 🐛 **Bug修复**：修复数据库删除员工时未记录到删除记录表的问题
+- 🐛 **Bug修复**：修复异常处理问题，添加具体的异常类型捕获
+- 🐛 **Bug修复**：修复数据校验问题，使用Validator类进行完整校验
+- 🐛 **Bug修复**：修复add_history方法中output_dir参数处理问题
+- 🐛 **Bug修复**：修复import_employees_from_df方法的错误处理
+- 🐛 **Bug修复**：修复generate_agricultural_version方法未使用参数的问题
+- 🔧 优化代码结构和错误处理机制
 
 ### v2.3 (2026-03-13)
 - 🏦 **农业银行版式升级**：合并本行/跨行版式为批量转账版式
