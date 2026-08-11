@@ -4989,18 +4989,30 @@ class SmartPasteDialog:
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
-        # 居中
+        # 居中，并确保不会超出显示器工作区
         self.dialog.update_idletasks()
         parent_x = parent.winfo_x()
         parent_y = parent.winfo_y()
         parent_width = parent.winfo_width()
         parent_height = parent.winfo_height()
-        dialog_width = 800
-        dialog_height = 720
+
+        dialog_width = 960
+        dialog_height = 950
+        # 按屏幕大小自适应，但固定上限防止双屏/高分屏下超出实际可用区域
+        screen_width = self.dialog.winfo_screenwidth()
+        screen_height = self.dialog.winfo_screenheight()
+        dialog_width = min(dialog_width, screen_width - 80)
+        dialog_height = min(dialog_height, screen_height - 140)
+
         x = parent_x + (parent_width - dialog_width) // 2
         y = parent_y + (parent_height - dialog_height) // 2
+        # 防止被拖到屏幕外
+        x = max(0, min(x, screen_width - dialog_width - 20))
+        y = max(0, min(y, screen_height - dialog_height - 60))
+
         self.dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
-        self.dialog.minsize(700, 500)
+        self.dialog.minsize(680, 520)
+        self.dialog.resizable(True, True)
 
         # 标题
         header = ttk.Frame(self.dialog, bootstyle="info")
@@ -5021,15 +5033,20 @@ class SmartPasteDialog:
         example_frame.pack(fill=X, pady=(0, 10))
         example_text = """张三  370830200510031731  18608075173  6214 8318 3028 5166  308290003298  上海天山支行
 
-或带标签：
-姓名：张三，身份证：370830200510031731，手机：18608075173
+或带标签：姓名：张三，身份证：370830200510031731，手机：18608075173
 卡号：6214 8318 3028 5166，联行号：308290003298，开户行：上海天山支行
 
 或多行 Excel 粘贴（含表头）：
 姓名\t身份证号码\t手机号\t银行卡号\t联行号\t开户行
 张三\t370830200510031731\t18608075173\t6214831830285166\t308290003298\t上海天山支行"""
-        ttk.Label(example_frame, text=example_text, font=('Microsoft YaHei', 9),
-                 bootstyle="secondary", justify=LEFT).pack(anchor=W)
+        example_box = tk.Text(example_frame, wrap='word', height=5, font=('Microsoft YaHei', 9),
+                              bg='#f8f9fa', fg='#6c757d', relief='flat', padx=4, pady=2)
+        example_box.pack(fill=BOTH, expand=YES, side=LEFT)
+        example_box.insert('1.0', example_text)
+        example_box.config(state='disabled')
+        ex_scroll = ttk.Scrollbar(example_frame, orient="vertical", command=example_box.yview)
+        example_box.configure(yscrollcommand=ex_scroll.set)
+        ex_scroll.pack(fill=Y, side=RIGHT)
 
         # 输入框
         ttk.Label(content_frame, text="粘贴内容：", font=('Microsoft YaHei', 11)).pack(anchor=W, pady=(5, 3))
@@ -5039,7 +5056,7 @@ class SmartPasteDialog:
         text_frame.grid_rowconfigure(0, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
 
-        self.text_input = tk.Text(text_frame, wrap='word', height=10, font=('Microsoft YaHei', 11))
+        self.text_input = tk.Text(text_frame, wrap='word', height=8, font=('Microsoft YaHei', 11))
         self.text_input.grid(row=0, column=0, sticky='nsew')
         text_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.text_input.yview)
         self.text_input.configure(yscrollcommand=text_scroll.set)
