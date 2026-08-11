@@ -29,6 +29,7 @@ import re
 import json
 import sqlite3
 import shutil
+import sys
 
 # 修复Python 3.12+的SQLite datetime适配器警告
 try:
@@ -48,8 +49,13 @@ except:
 
 
 # 版本信息
-VERSION = "v2.5"
+VERSION = "v2.6"
 COPYRIGHT = "2026 惊鸿科技（济宁）有限公司"
+
+
+def get_desktop_path():
+    """获取桌面路径，避免安装在 Program Files 下时无写权限"""
+    return os.path.join(os.path.expanduser("~"), "Desktop")
 
 
 class DatabaseManager:
@@ -200,6 +206,9 @@ class DatabaseManager:
 
     def add_employee(self, name, id_card='', phone='', bank_card='', interbank_code='', bank_name='', method='手动添加'):
         """添加员工"""
+        # 必填项校验：姓名、身份证号、手机号
+        if not name or not id_card or not phone:
+            return False, "姓名、身份证号、手机号为必填项"
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
@@ -228,6 +237,9 @@ class DatabaseManager:
 
     def update_employee(self, employee_id, name, id_card='', phone='', bank_card='', interbank_code='', bank_name=''):
         """更新员工信息"""
+        # 必填项校验：姓名、身份证号、手机号
+        if not name or not id_card or not phone:
+            return False, "姓名、身份证号、手机号为必填项"
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
@@ -534,12 +546,46 @@ class DatabaseManager:
             '开户行': row['bank_name'] or ''
         } for row in rows]
 
-    def import_employees_from_df(self, df):
-        """从DataFrame批量导入员工"""
+    def find_existing_for_import(self, id_card, name):
+        """导入前查找已存在员工（与导入逻辑一致：先身份证，再姓名），返回完整记录字典"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM employees WHERE id_card = ?', (id_card,))
+        existing = cursor.fetchone()
+        if not existing:
+            cursor.execute('SELECT id FROM employees WHERE name = ?', (name,))
+            existing = cursor.fetchone()
+        if existing:
+            emp_id = existing['id']
+            cursor.execute('''
+                SELECT id, name, id_card, phone, bank_card, interbank_code, bank_name
+                FROM employees WHERE id = ?
+            ''', (emp_id,))
+            row = cursor.fetchone()
+            conn.close()
+            return {
+                'id': row['id'],
+                'name': row['name'] or '',
+                'id_card': row['id_card'] or '',
+                'phone': row['phone'] or '',
+                'bank_card': row['bank_card'] or '',
+                'interbank_code': row['interbank_code'] or '',
+                'bank_name': row['bank_name'] or ''
+            }
+        conn.close()
+        return None
+
+    def import_employees_from_df(self, df, overwrite_ids=None):
+        """从DataFrame批量导入员工
+
+        overwrite_ids: 需要覆盖的已有员工 id 集合；为 None 或空集时，遇到已存在记录一律跳过，避免错误覆盖
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         imported = 0
         updated = 0
+        skipped = 0
+        kept = 0  # 已存在但被保留（未覆盖）的记录数
 
         for _, row in df.iterrows():
             name = row.get('姓名', '')
@@ -549,50 +595,47 @@ class DatabaseManager:
             interbank_code = row.get('联行号', '')
             bank_name = row.get('开户行', '')
 
-            if not name:
+            if not name or not id_card or not phone:
+                skipped += 1
                 continue
 
             # 检查是否已存在（根据身份证号）
-            if id_card:
-                cursor.execute('SELECT id FROM employees WHERE id_card = ?', (id_card,))
+            cursor.execute('SELECT id FROM employees WHERE id_card = ?', (id_card,))
+            existing = cursor.fetchone()
+            if not existing and name:
+                # 检查是否已存在（根据姓名）
+                cursor.execute('SELECT id FROM employees WHERE name = ?', (name,))
                 existing = cursor.fetchone()
-                if existing:
-                    # 更新
+
+            if existing:
+                emp_id = existing['id']
+                if overwrite_ids is not None and emp_id in overwrite_ids:
+                    # 经用户确认后覆盖更新
                     cursor.execute('''
                         UPDATE employees SET
-                            name = ?, phone = ?, bank_card = ?,
+                            name = ?, id_card = ?, phone = ?, bank_card = ?,
                             interbank_code = ?, bank_name = ?, updated_at = ?
                         WHERE id = ?
-                    ''', (name, phone, bank_card, interbank_code, bank_name, datetime.now(), existing['id']))
+                    ''', (name, id_card, phone, bank_card, interbank_code, bank_name, datetime.now(), emp_id))
                     updated += 1
-                    continue
+                else:
+                    # 未确认覆盖，保留原数据
+                    kept += 1
+                continue
 
-            # 检查是否已存在（根据姓名）
-            cursor.execute('SELECT id FROM employees WHERE name = ?', (name,))
-            existing = cursor.fetchone()
-            if existing:
-                # 更新
+            # 新增
+            try:
                 cursor.execute('''
-                    UPDATE employees SET
-                        id_card = ?, phone = ?, bank_card = ?,
-                        interbank_code = ?, bank_name = ?, updated_at = ?
-                    WHERE id = ?
-                ''', (id_card, phone, bank_card, interbank_code, bank_name, datetime.now(), existing['id']))
-                updated += 1
-            else:
-                # 新增
-                try:
-                    cursor.execute('''
-                        INSERT INTO employees (name, id_card, phone, bank_card, interbank_code, bank_name, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (name, id_card, phone, bank_card, interbank_code, bank_name, datetime.now()))
-                    imported += 1
-                except sqlite3.IntegrityError as e:
-                    print(f"插入员工 {name} 失败: {e}")
+                    INSERT INTO employees (name, id_card, phone, bank_card, interbank_code, bank_name, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (name, id_card, phone, bank_card, interbank_code, bank_name, datetime.now()))
+                imported += 1
+            except sqlite3.IntegrityError as e:
+                print(f"插入员工 {name} 失败: {e}")
 
         conn.commit()
         conn.close()
-        return imported, updated
+        return imported, updated, skipped, kept
 
     # ==================== 历史记录操作 ====================
 
@@ -1095,12 +1138,8 @@ class Validator:
             return True, None
 
         phone = str(phone).strip()
-        if len(phone) != 11:
-            return False, f"手机号必须为11位"
-        if not phone.isdigit():
-            return False, "手机号必须为数字"
-        if not phone.startswith('1'):
-            return False, "手机号必须以1开头"
+        if not re.match(r'^1[3-9]\d{9}$', phone):
+            return False, "手机号格式不正确（应为1开头的11位号码）"
         return True, None
 
 
@@ -1113,7 +1152,7 @@ class SalaryTool:
         self.root.geometry("1600x1000")
         self.root.minsize(1500, 900)
 
-        # 初始化数据库
+        # 初始化数据库（放在程序目录，不占用桌面）
         self.db = DatabaseManager("salary_tool.db")
 
         # 数据文件路径（保留Excel路径用于导入导出）
@@ -1320,6 +1359,9 @@ class SalaryTool:
         self.frame_backup = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.frame_backup, text=" 备份恢复 ")
         self.create_backup_tab()
+
+        # 联行号数据延迟加载：首次切换到"联行号查询"页时才读取 13.6MB 大文件
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # 底部状态栏
         self.create_status_bar(main_container)
@@ -2317,6 +2359,10 @@ class SalaryTool:
             error_data_frame = ttk.Labelframe(content_frame, text=f"⚠️ 数据异常 ({len(error_data)}人)", padding=10)
             error_data_frame.pack(fill=BOTH, expand=YES, pady=(0, 10))
 
+            # 顶部按钮栏：一键复制异常数据
+            btn_bar_error = ttk.Frame(error_data_frame)
+            btn_bar_error.pack(fill=X, pady=(0, 8))
+
             # 创建带滚动条的表格
             tree_frame_error = ttk.Frame(error_data_frame)
             tree_frame_error.pack(fill=BOTH, expand=YES)
@@ -2324,6 +2370,8 @@ class SalaryTool:
             # 异常数据全部显示，不限制行数，使用滚动条查看
             error_height = min(max(len(error_data), 3), 15)  # 显示区域高度固定15行，但所有数据都可通过滚动条查看
             tree_error = ttk.Treeview(tree_frame_error, columns=('姓名', '工资', '身份证', '手机号', '银行卡', '开户行', '状态'), show='headings', height=error_height)
+
+            error_rows = []  # 收集异常数据行用于复制
 
             # 设置列宽
             tree_error.column('姓名', width=80, anchor='center')
@@ -2375,7 +2423,7 @@ class SalaryTool:
                 if len(issues) > 2:
                     status += '...'
 
-                tree_error.insert('', 'end', values=(
+                row_values = (
                     item['姓名'],
                     f"{item['工资']:.2f}",
                     id_card_display,
@@ -2383,10 +2431,25 @@ class SalaryTool:
                     bank_card_display,
                     bank_name_display,
                     status
-                ), tags=('error',))
+                )
+                error_rows.append(row_values)
+                tree_error.insert('', 'end', values=row_values, tags=('error',))
 
             # 设置标签样式
             tree_error.tag_configure('error', foreground='red')
+
+            def copy_error_data():
+                # 表头 + 数据行，制表符分隔，便于粘贴到 Excel
+                header = ['姓名', '工资', '身份证', '手机号', '银行卡', '开户行', '状态']
+                lines = ['\t'.join(header)]
+                for row in error_rows:
+                    lines.append('\t'.join(str(c) for c in row))
+                preview_window.clipboard_clear()
+                preview_window.clipboard_append('\n'.join(lines))
+                messagebox.showinfo("提示", "异常数据已复制到剪贴板", parent=preview_window)
+
+            ttk.Button(btn_bar_error, text="📋 复制异常数据", command=copy_error_data,
+                       bootstyle="info-outline").pack(side=RIGHT)
 
         # 正常数据表格（高度固定较小）
         if normal_data:
@@ -2453,16 +2516,37 @@ class SalaryTool:
         # 解析错误信息
         if errors:
             error_frame = ttk.Labelframe(content_frame, text=f"❌ 解析错误 ({len(errors)}条)", padding=10)
-            error_frame.pack(fill=X, pady=(0, 10))
+            error_frame.pack(fill=BOTH, expand=YES, pady=(0, 10))
 
-            error_text = tk.Text(error_frame, height=min(len(errors), 4), font=('Microsoft YaHei', 10), fg='red')
-            error_text.pack(fill=BOTH, expand=YES)
+            full_error_content = ""
+            for err in errors:
+                full_error_content += f"• {err}\n"
 
-            for err in errors[:10]:
-                error_text.insert('end', f"• {err}\n")
-            if len(errors) > 10:
-                error_text.insert('end', f"...还有 {len(errors)-10} 条错误\n")
+            def copy_errors():
+                preview_window.clipboard_clear()
+                preview_window.clipboard_append(full_error_content.rstrip())
+                messagebox.showinfo("提示", "错误内容已复制到剪贴板", parent=preview_window)
 
+            # 顶部按钮栏：一键复制始终可见
+            btn_bar = ttk.Frame(error_frame)
+            btn_bar.pack(fill=X, pady=(0, 8))
+            ttk.Button(btn_bar, text="📋 复制全部错误内容", command=copy_errors,
+                       bootstyle="info-outline").pack(side=RIGHT)
+
+            # 错误内容框架：Text + 右侧滚动条
+            err_inner = ttk.Frame(error_frame)
+            err_inner.pack(fill=BOTH, expand=YES)
+            err_inner.grid_rowconfigure(0, weight=1)
+            err_inner.grid_columnconfigure(0, weight=1)
+
+            error_text = tk.Text(err_inner, wrap='word', height=10, font=('Microsoft YaHei', 10), fg='red')
+            error_text.grid(row=0, column=0, sticky='nsew')
+
+            err_scroll = ttk.Scrollbar(err_inner, orient="vertical", command=error_text.yview)
+            error_text.configure(yscrollcommand=err_scroll.set)
+            err_scroll.grid(row=0, column=1, sticky='ns')
+
+            error_text.insert('end', full_error_content)
             error_text.config(state='disabled')
 
         # 关闭按钮
@@ -2506,8 +2590,8 @@ class SalaryTool:
 
         date_str = datetime.now().strftime("%Y%m%d_%H%M")
 
-        # 创建导出目录
-        output_dir = os.path.join(os.getcwd(), "导出报表", f"{company_name}-{salary_period}-{date_str}")
+        # 创建导出目录（桌面，避免 Program Files 无写权限）
+        output_dir = os.path.join(get_desktop_path(), "导出报表", f"{company_name}-{salary_period}-{date_str}")
         os.makedirs(output_dir, exist_ok=True)
 
         # 生成报表
@@ -2595,7 +2679,7 @@ class SalaryTool:
             name = d['姓名']
             bank_name = d.get('开户行', '')
             interbank = d.get('联行号', '')
-            interbank_clean = str(interbank).lstrip('0') if interbank else ''
+            interbank_clean = str(interbank).strip() if interbank else ''
             inner_type = '00' if '莱商' in bank_name else '01'
             amount = f"{d['工资']:.2f}"
 
@@ -2617,7 +2701,7 @@ class SalaryTool:
             name = d['姓名']
             bank_name = d.get('开户行', '')
             interbank = d.get('联行号', '')
-            interbank_clean = str(interbank).lstrip('0') if interbank else ''
+            interbank_clean = str(interbank).strip() if interbank else ''
             # 济宁银行版式：判断是否济宁银行
             inner_type = '00' if '济宁银行' in bank_name else '01'
             amount = f"{d['工资']:.2f}"
@@ -2894,49 +2978,55 @@ class SalaryTool:
             messagebox.showwarning("部分失败", f"成功删除 {success_count} 名，失败 {failed_count} 名\n\n失败名单：{', '.join(failed_names[:5])}{'...' if len(failed_names) > 5 else ''}")
 
     def smart_paste_employee(self):
-        """智能粘贴员工信息（使用数据库）"""
+        """智能粘贴员工信息（使用数据库），支持批量识别"""
         dialog = SmartPasteDialog(self.root, self)
-        if dialog.parsed_data:
-            data = dialog.parsed_data
-            name = data['姓名']
+        if dialog.parsed_data_list:
+            added = 0
+            updated = 0
+            failed = []
 
-            # 检查是否已存在
-            existing = self.db.find_employee_by_name(name)
-            is_update = len(existing) > 0
+            for data in dialog.parsed_data_list:
+                name = data['姓名']
+                id_card = data['身份证号码']
+                phone = data['手机号']
 
-            if is_update:
-                if not messagebox.askyesno("确认", f"员工 '{name}' 已存在，是否更新信息？"):
-                    return
-                # 更新第一个匹配的员工
-                employee_id = existing[0]['id']
-                self.db.update_employee(
-                    employee_id,
-                    name,
-                    data['身份证号码'],
-                    data['手机号'],
-                    data['银行卡号'],
-                    data['联行号'],
-                    data['开户行']
-                )
-            else:
-                # 添加新员工
-                self.db.add_employee(
-                    name,
-                    data['身份证号码'],
-                    data['手机号'],
-                    data['银行卡号'],
-                    data['联行号'],
-                    data['开户行']
-                )
+                # 必填校验，缺失则记录并跳过
+                if not name or not id_card or not phone:
+                    failed.append(f"{name or '未知'}: 缺少必填项")
+                    continue
+
+                existing = self.db.find_employee_by_name(name)
+                is_update = len(existing) > 0
+
+                if is_update:
+                    employee_id = existing[0]['id']
+                    success, error = self.db.update_employee(
+                        employee_id, name, id_card, phone,
+                        data['银行卡号'], data['联行号'], data['开户行']
+                    )
+                    if success:
+                        updated += 1
+                    else:
+                        failed.append(f"{name}: {error}")
+                else:
+                    success, error = self.db.add_employee(
+                        name, id_card, phone,
+                        data['银行卡号'], data['联行号'], data['开户行']
+                    )
+                    if success:
+                        added += 1
+                    else:
+                        failed.append(f"{name}: {error}")
 
             self.load_roster()
             self.refresh_roster_list()
 
-            info = f"员工 '{name}' 已{'更新' if is_update else '添加'}\n\n"
-            info += f"身份证: {data['身份证号码'] or '未填写'}\n"
-            info += f"银行卡: {data['银行卡号'] or '未填写'}\n"
-            info += f"开户行: {data['开户行'] or '未填写'}"
-            messagebox.showinfo("成功", info)
+            msg = f"智能粘贴完成！新增 {added} 人，更新 {updated} 人"
+            if failed:
+                msg += f"\n\n失败 {len(failed)} 条:\n" + "\n".join(failed[:10])
+                if len(failed) > 10:
+                    msg += f"\n...等共 {len(failed)} 条"
+            messagebox.showinfo("完成", msg)
 
     def import_roster(self):
         """批量导入花名册（使用数据库）"""
@@ -2951,19 +3041,60 @@ class SalaryTool:
                 else:
                     df = pd.read_excel(file_path, dtype=str)
 
-                required_cols = ['姓名', '身份证号码', '手机号', '银行卡号', '联行号', '开户行']
+                required_cols = ['姓名', '身份证号码', '手机号']
                 missing_cols = [col for col in required_cols if col not in df.columns]
 
                 if missing_cols:
                     messagebox.showwarning("警告", f"缺少以下列: {', '.join(missing_cols)}\n\n现有列: {', '.join(df.columns)}")
                     return
 
-                # 使用数据库导入
-                imported, updated = self.db.import_employees_from_df(df)
+                # 扫描冲突：已存在且数据不同的记录需要逐条确认
+                conflicts = []
+                for _, row in df.iterrows():
+                    name = row.get('姓名', '')
+                    id_card = row.get('身份证号码', '')
+                    phone = row.get('手机号', '')
+                    bank_card = row.get('银行卡号', '')
+                    interbank_code = row.get('联行号', '')
+                    bank_name = row.get('开户行', '')
+
+                    if not name or not id_card or not phone:
+                        continue
+
+                    existing = self.db.find_existing_for_import(id_card, name)
+                    if not existing:
+                        continue
+
+                    new_vals = {
+                        'name': name, 'id_card': id_card, 'phone': phone,
+                        'bank_card': bank_card, 'interbank_code': interbank_code, 'bank_name': bank_name
+                    }
+                    changed = any(
+                        str(existing.get(k, '')).strip() != str(new_vals.get(k, '')).strip()
+                        for k in new_vals
+                    )
+                    if changed:
+                        conflicts.append((existing, new_vals))
+
+                overwrite_ids = set()
+                if conflicts:
+                    dialog = ConflictReviewDialog(self.root, conflicts)
+                    if dialog.result is None:
+                        # 用户取消
+                        return
+                    overwrite_ids = dialog.result
+
+                # 使用数据库导入（仅覆盖用户确认的记录）
+                imported, updated, skipped, kept = self.db.import_employees_from_df(df, overwrite_ids=overwrite_ids)
                 self.load_roster()
                 self.refresh_roster_list()
 
-                messagebox.showinfo("成功", f"导入完成！新增 {imported} 名员工，更新 {updated} 名员工")
+                msg = f"导入完成！新增 {imported} 名员工，更新 {updated} 名员工"
+                if kept:
+                    msg += f"\n保留 {kept} 条（已存在，未覆盖）"
+                if skipped:
+                    msg += f"\n已跳过 {skipped} 行（缺少姓名、身份证号或手机号）"
+                messagebox.showinfo("成功", msg)
                 self.status_label.config(text=f"已导入花名册: {file_path}")
 
             except Exception as e:
@@ -3689,15 +3820,19 @@ CSV示例：
         self.bankcode_tree.bind('<Button-3>', self.show_bankcode_context_menu)
 
         # 状态栏
-        self.bankcode_status = ttk.Label(self.frame_bankcode, text="就绪", font=('Microsoft YaHei', 10), bootstyle="secondary")
+        self.bankcode_status = ttk.Label(self.frame_bankcode, text="切换到此页或生成报表时自动加载", font=('Microsoft YaHei', 10), bootstyle="secondary")
         self.bankcode_status.pack(anchor=W, pady=(10, 0))
 
-        # 加载联行号数据
-        self.load_bankcode_data()
+        # 联行号数据延迟加载（避免启动时读取 13.6MB 大文件拖慢启动）
+        self._bankcode_loaded = False
 
     def get_bank_name_from_interbank(self, interbank_code):
         """根据联行号获取银行名称"""
-        if not interbank_code or self.bankcode_df is None:
+        if not interbank_code:
+            return None
+        # 首次使用时按需加载联行号数据
+        self.ensure_bankcode_loaded()
+        if self.bankcode_df is None:
             return None
 
         try:
@@ -3709,10 +3844,29 @@ CSV示例：
             pass
         return None
 
+    def _on_tab_changed(self, event):
+        """切换到"联行号查询"标签页时加载数据"""
+        try:
+            if self.notebook.index(self.notebook.select()) == self.notebook.index(self.frame_bankcode):
+                self.ensure_bankcode_loaded()
+        except Exception:
+            pass
+
+    def ensure_bankcode_loaded(self):
+        """确保联行号数据已加载（首次使用时才读取大文件）"""
+        if not self._bankcode_loaded:
+            self.load_bankcode_data()
+
     def load_bankcode_data(self):
         """加载联行号数据"""
         self.bankcode_df = None
-        bankcode_file = "net_bank_code.csv"
+        self._bankcode_loaded = True
+
+        # 兼容 PyInstaller onefile 打包：数据文件会被解压到 sys._MEIPASS 临时目录
+        if getattr(sys, 'frozen', False):
+            bankcode_file = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(sys.executable)), 'net_bank_code.csv')
+        else:
+            bankcode_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'net_bank_code.csv')
 
         if os.path.exists(bankcode_file):
             try:
@@ -4072,9 +4226,18 @@ CSV示例：
             width=20
         ).pack(pady=10)
 
-        # 说明区域
-        info_frame = ttk.Labelframe(content, text=" 说明 ", padding=20)
+        # 说明区域（带滚动条，避免说明过多被截断）
+        info_frame = ttk.Labelframe(content, text=" 说明 ", padding=10)
         info_frame.pack(fill=BOTH, expand=YES, pady=10)
+        info_frame.grid_rowconfigure(0, weight=1)
+        info_frame.grid_columnconfigure(0, weight=1)
+
+        self.backup_info_text = tk.Text(info_frame, wrap='word', font=('Microsoft YaHei', 10))
+        self.backup_info_text.grid(row=0, column=0, sticky='nsew')
+
+        info_scroll = ttk.Scrollbar(info_frame, orient="vertical", command=self.backup_info_text.yview)
+        self.backup_info_text.configure(yscrollcommand=info_scroll.set)
+        info_scroll.grid(row=0, column=1, sticky='ns')
 
         info_text = """💡 备份恢复功能说明：
 
@@ -4088,7 +4251,8 @@ CSV示例：
 
 ⚠️ 注意：恢复数据将覆盖当前所有数据，请谨慎操作！"""
 
-        ttk.Label(info_frame, text=info_text, font=('Microsoft YaHei', 10), justify=LEFT).pack(anchor=W)
+        self.backup_info_text.insert('end', info_text)
+        self.backup_info_text.config(state='disabled')
 
         # 状态栏
         self.backup_status = ttk.Label(self.frame_backup, text="就绪", font=('Microsoft YaHei', 10), bootstyle="secondary")
@@ -4522,7 +4686,7 @@ class EmployeeDialog:
                 self.vars[var_name].set(value)
 
     def save(self):
-        """保存员工信息（使用数据库）- 所有字段必填"""
+        """保存员工信息（使用数据库）- 姓名、身份证号、手机号为必填项"""
         name = self.vars['name'].get().strip()
         id_card = self.vars['id_card'].get().strip()
         phone = self.vars['phone'].get().strip()
@@ -4530,7 +4694,7 @@ class EmployeeDialog:
         interbank = self.vars['interbank'].get().strip()
         bank_name = self.vars['bank_name'].get().strip()
 
-        # 校验所有必填字段
+        # 校验必填字段
         if not name:
             messagebox.showwarning("提示", "姓名不能为空", parent=self.dialog)
             return
@@ -4543,41 +4707,30 @@ class EmployeeDialog:
             messagebox.showwarning("提示", "手机号不能为空", parent=self.dialog)
             return
 
-        if not bank_card:
-            messagebox.showwarning("提示", "银行卡号不能为空", parent=self.dialog)
-            return
-
-        if not interbank:
-            messagebox.showwarning("提示", "联行号不能为空", parent=self.dialog)
-            return
-
-        if not bank_name:
-            messagebox.showwarning("提示", "开户行不能为空", parent=self.dialog)
-            return
-
-        # 校验身份证格式
+        # 校验身份证格式（必填，必须校验）
         is_valid, error_msg, _ = Validator.validate_id_card(id_card)
         if not is_valid:
             messagebox.showwarning("提示", f"身份证号码错误: {error_msg}", parent=self.dialog)
             return
 
-        # 校验手机号格式
+        # 校验手机号格式（必填，必须校验）
         is_valid, error_msg = Validator.validate_phone(phone)
         if not is_valid:
             messagebox.showwarning("提示", f"手机号错误: {error_msg}", parent=self.dialog)
             return
 
-        # 校验银行卡号格式
-        is_valid, error_msg, _ = Validator.validate_bank_card(bank_card)
-        if not is_valid:
-            messagebox.showwarning("提示", f"银行卡号错误: {error_msg}", parent=self.dialog)
-            return
+        # 银行卡号、联行号、开户行为选填，仅在填写时校验格式
+        if bank_card:
+            is_valid, error_msg, _ = Validator.validate_bank_card(bank_card)
+            if not is_valid:
+                messagebox.showwarning("提示", f"银行卡号错误: {error_msg}", parent=self.dialog)
+                return
 
-        # 校验联行号格式
-        is_valid, error_msg = Validator.validate_interbank_code(interbank)
-        if not is_valid:
-            messagebox.showwarning("提示", f"联行号错误: {error_msg}", parent=self.dialog)
-            return
+        if interbank:
+            is_valid, error_msg = Validator.validate_interbank_code(interbank)
+            if not is_valid:
+                messagebox.showwarning("提示", f"联行号错误: {error_msg}", parent=self.dialog)
+                return
 
         if self.is_edit:
             # 更新现有员工
@@ -4709,105 +4862,238 @@ class DuplicateNameDialog:
         self.dialog.destroy()
 
 
+class ConflictReviewDialog:
+    """导入冲突逐条确认对话框
+
+    每条已存在且将被覆盖的记录显示为一行，带复选框（默认不勾选=保留原数据）。
+    result: 确认覆盖的 id 集合；取消时为 None。
+    """
+
+    FIELDS = [
+        ('姓名', 'name', 'name'),
+        ('身份证', 'id_card', 'id_card'),
+        ('手机号', 'phone', 'phone'),
+        ('银行卡号', 'bank_card', 'bank_card'),
+        ('联行号', 'interbank_code', 'interbank_code'),
+        ('开户行', 'bank_name', 'bank_name'),
+    ]
+
+    def __init__(self, parent, conflicts):
+        self.result = set()
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("导入冲突确认")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.dialog.update_idletasks()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        w, h = 820, 640
+        self.dialog.geometry(f"{w}x{h}+{px + (pw - w)//2}+{py + (ph - h)//2}")
+        self.dialog.minsize(680, 420)
+
+        ttk.Label(self.dialog, text=f"⚠️ 发现 {len(conflicts)} 条已存在的记录，请选择需要覆盖的项\n（默认保留原数据，避免错误覆盖）",
+                 font=('Microsoft YaHei', 11), wraplength=760, justify=CENTER).pack(pady=12)
+
+        # 滚动区域
+        canvas = tk.Canvas(self.dialog)
+        scroll = ttk.Scrollbar(self.dialog, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        self.vars = []  # (emp_id, BooleanVar)
+        for existing, new_vals in conflicts:
+            emp_id = existing['id']
+            var = tk.BooleanVar(value=False)
+            self.vars.append((emp_id, var))
+
+            row_frame = ttk.Labelframe(inner, text=f"{existing.get('name','')}  (身份证: {existing.get('id_card','')})", padding=8)
+            row_frame.pack(fill=X, padx=10, pady=5)
+
+            cb = ttk.Checkbutton(row_frame, text="覆盖此项", variable=var, bootstyle="success")
+            cb.pack(anchor=W, pady=(0, 6))
+
+            # 字段对比表：原值 -> 新值
+            for label, e_key, n_key in self.FIELDS:
+                old_v = str(existing.get(e_key, '') or '')
+                new_v = str(new_vals.get(n_key, '') or '')
+                if old_v == new_v:
+                    ttk.Label(row_frame, text=f"{label}: {old_v or '（空）'}",
+                             font=('Microsoft YaHei', 9)).pack(anchor=W)
+                else:
+                    line = ttk.Frame(row_frame)
+                    line.pack(anchor=W, fill=X)
+                    ttk.Label(line, text=f"{label}: ", font=('Microsoft YaHei', 9)).pack(side=LEFT)
+                    ttk.Label(line, text=old_v or '（空）', font=('Microsoft YaHei', 9), bootstyle="danger").pack(side=LEFT)
+                    ttk.Label(line, text="  →  ", font=('Microsoft YaHei', 9)).pack(side=LEFT)
+                    ttk.Label(line, text=new_v or '（空）', font=('Microsoft YaHei', 9), bootstyle="success").pack(side=LEFT)
+
+        inner.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.pack(side=LEFT, fill=BOTH, expand=YES, padx=(12, 0), pady=8)
+        scroll.pack(side=RIGHT, fill=Y, pady=8, padx=(0, 12))
+
+        def on_resize(e):
+            canvas.itemconfig(inner_id, width=e.width)
+        canvas.bind('<Configure>', on_resize)
+
+        # 底部按钮
+        btn_frame = ttk.Frame(self.dialog, padding=12)
+        btn_frame.pack(fill=X, side=BOTTOM)
+
+        def select_all():
+            for _, v in self.vars:
+                v.set(True)
+
+        def select_none():
+            for _, v in self.vars:
+                v.set(False)
+
+        def confirm():
+            self.result = {emp_id for emp_id, v in self.vars if v.get()}
+            self.dialog.destroy()
+
+        def cancel():
+            self.result = None
+            self.dialog.destroy()
+
+        ttk.Button(btn_frame, text="全选覆盖", command=select_all, bootstyle="success-outline", width=12).pack(side=LEFT, padx=5)
+        ttk.Button(btn_frame, text="全不选", command=select_none, bootstyle="secondary-outline", width=12).pack(side=LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=cancel, bootstyle="secondary", width=12).pack(side=RIGHT, padx=5)
+        ttk.Button(btn_frame, text="确认覆盖选中", command=confirm, bootstyle="success", width=14).pack(side=RIGHT, padx=5)
+
+        self.dialog.wait_window(self.dialog)
+
+
 class SmartPasteDialog:
-    """智能粘贴对话框"""
+    """智能粘贴对话框（支持多员工、自动表头识别、无标签纯数据识别）"""
+
+    FIELD_ALIASES = {
+        '姓名': ['姓名', '名字', '员工姓名', 'name'],
+        '身份证号码': ['身份证号码', '身份证号', '身份证', 'id_card', 'idcard'],
+        '手机号': ['手机号', '手机号码', '电话', '手机', 'phone', 'mobile'],
+        '银行卡号': ['银行卡号', '卡号', '银行账号', 'bank_card', 'bankcard'],
+        '联行号': ['联行号', '开户行行号', '行号', 'interbank', 'bank_code'],
+        '开户行': ['开户行', '开户行名称', '银行', '开户银行', 'bank_name'],
+    }
 
     def __init__(self, parent, main_app):
         self.main_app = main_app
-        self.parsed_data = None
+        self.parsed_data_list = []
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("智能粘贴员工信息")
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
-        # 相对于主窗体居中显示
+        # 居中
         self.dialog.update_idletasks()
         parent_x = parent.winfo_x()
         parent_y = parent.winfo_y()
         parent_width = parent.winfo_width()
         parent_height = parent.winfo_height()
-        dialog_width = 750
-        dialog_height = 850
+        dialog_width = 800
+        dialog_height = 720
         x = parent_x + (parent_width - dialog_width) // 2
         y = parent_y + (parent_height - dialog_height) // 2
         self.dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
-        self.dialog.minsize(700, 700)
+        self.dialog.minsize(700, 500)
 
         # 标题
         header = ttk.Frame(self.dialog, bootstyle="info")
         header.pack(fill=X)
-
         ttk.Label(header, text="📋 智能粘贴员工信息",
                  font=('Microsoft YaHei', 16, 'bold'),
-                 bootstyle="inverse-info").pack(pady=15)
+                 bootstyle="inverse-info").pack(pady=12)
 
-        # 主内容区域
+        # 主内容
         content_frame = ttk.Frame(self.dialog)
         content_frame.pack(fill=BOTH, expand=YES, padx=20, pady=10)
 
-        # 说明
-        ttk.Label(content_frame, text="请粘贴包含员工信息的文本，程序会自动识别：",
-                 font=('Microsoft YaHei', 11)).pack(anchor=W, pady=(0, 10))
+        ttk.Label(content_frame, text="粘贴任意员工信息文本，支持单条/多行/表格，程序自动识别：",
+                 font=('Microsoft YaHei', 11)).pack(anchor=W, pady=(0, 8))
 
         # 示例
-        example_frame = ttk.Labelframe(content_frame, text="示例格式", padding=10)
+        example_frame = ttk.Labelframe(content_frame, text="示例格式（自动识别列标题或纯数据）", padding=10)
         example_frame.pack(fill=X, pady=(0, 10))
+        example_text = """张三  370830200510031731  18608075173  6214 8318 3028 5166  308290003298  上海天山支行
 
-        example_text = """1.姓名：张三
-2.身份证号码：370830200510031731
-3.银行卡号：6214 8318 3028 5166
-4.开户行行号：308290003298
-5.开户行名称：上海天山支行
-6.手机号：18608075173"""
+或带标签：
+姓名：张三，身份证：370830200510031731，手机：18608075173
+卡号：6214 8318 3028 5166，联行号：308290003298，开户行：上海天山支行
 
-        ttk.Label(example_frame, text=example_text,
-                 font=('Microsoft YaHei', 10),
-                 bootstyle="secondary").pack(anchor=W)
+或多行 Excel 粘贴（含表头）：
+姓名\t身份证号码\t手机号\t银行卡号\t联行号\t开户行
+张三\t370830200510031731\t18608075173\t6214831830285166\t308290003298\t上海天山支行"""
+        ttk.Label(example_frame, text=example_text, font=('Microsoft YaHei', 9),
+                 bootstyle="secondary", justify=LEFT).pack(anchor=W)
 
         # 输入框
-        ttk.Label(content_frame, text="粘贴内容：", font=('Microsoft YaHei', 11)).pack(anchor=W, pady=(10, 5))
-        
-        self.text_input = tk.Text(content_frame, height=12, font=('Microsoft YaHei', 12))
-        self.text_input.pack(fill=BOTH, expand=YES)
+        ttk.Label(content_frame, text="粘贴内容：", font=('Microsoft YaHei', 11)).pack(anchor=W, pady=(5, 3))
 
-        # 解析按钮 - 固定在底部
-        btn_frame = ttk.Frame(self.dialog, padding=15)
+        text_frame = ttk.Frame(content_frame)
+        text_frame.pack(fill=BOTH, expand=YES)
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+
+        self.text_input = tk.Text(text_frame, wrap='word', height=10, font=('Microsoft YaHei', 11))
+        self.text_input.grid(row=0, column=0, sticky='nsew')
+        text_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.text_input.yview)
+        self.text_input.configure(yscrollcommand=text_scroll.set)
+        text_scroll.grid(row=0, column=1, sticky='ns')
+
+        # 结果预览区
+        ttk.Label(content_frame, text="识别结果：", font=('Microsoft YaHei', 11)).pack(anchor=W, pady=(8, 3))
+        result_frame = ttk.Frame(content_frame)
+        result_frame.pack(fill=BOTH, expand=YES)
+        result_frame.grid_rowconfigure(0, weight=1)
+        result_frame.grid_columnconfigure(0, weight=1)
+
+        self.result_text = tk.Text(result_frame, wrap='word', height=8, font=('Microsoft YaHei', 10))
+        self.result_text.grid(row=0, column=0, sticky='nsew')
+        result_scroll = ttk.Scrollbar(result_frame, orient="vertical", command=self.result_text.yview)
+        self.result_text.configure(yscrollcommand=result_scroll.set)
+        result_scroll.grid(row=0, column=1, sticky='ns')
+        self.result_text.config(state='disabled')
+
+        # 底部按钮
+        btn_frame = ttk.Frame(self.dialog, padding=12)
         btn_frame.pack(fill=X, side=BOTTOM)
 
         ttk.Button(btn_frame, text="取消", command=self.dialog.destroy,
                   bootstyle="secondary", width=12).pack(side=LEFT, padx=5)
 
         ttk.Button(btn_frame, text="🔍 智能解析", command=self.parse_text,
-                  bootstyle="info", width=12).pack(side=RIGHT, padx=5)
+                  bootstyle="info", width=14).pack(side=RIGHT, padx=5)
+
+        ttk.Button(btn_frame, text="💾 保存识别结果", command=self.save_parsed,
+                  bootstyle="success", width=14).pack(side=RIGHT, padx=5)
 
         self.dialog.wait_window(self.dialog)
 
-    def parse_text(self):
-        """解析文本"""
-        text = self.text_input.get("1.0", 'end').strip()
-        if not text:
-            messagebox.showwarning("提示", "请输入内容", parent=self.dialog)
-            return
+    def _normalize_header(self, header):
+        """把表头列名归一化到我们内部字段"""
+        h = header.strip().lower().replace(' ', '').replace('_', '').replace('（', '(').replace('）', ')')
+        for field, aliases in self.FIELD_ALIASES.items():
+            for alias in aliases:
+                if alias.lower().replace(' ', '').replace('_', '') in h or h in alias.lower():
+                    return field
+        return None
 
-        data = {
-            '姓名': '',
-            '身份证号码': '',
-            '手机号': '',
-            '银行卡号': '',
-            '联行号': '',
-            '开户行': ''
-        }
-
+    def _extract_by_pattern(self, text):
+        """用正则从标签化文本中提取单条记录"""
+        data = {k: '' for k in self.FIELD_ALIASES}
         patterns = [
-            (r'(?:姓名|名字|员工姓名)[：:\s]*([^\n]+)', '姓名'),
+            (r'(?:姓名|名字|员工姓名)[：:\s]*([^\n\t,，]+)', '姓名'),
             (r'(?:身份证号码|身份证号|身份证)[：:\s]*(\d{17}[\dXx])', '身份证号码'),
-            (r'(?:手机号码|手机号|电话|手机)[：:\s]*(1\d{10})', '手机号'),
-            (r'(?:银行卡号|卡号|银行账号)[：:\s]*([\d\s]+)', '银行卡号'),
+            (r'(?:手机号码|手机号|电话|手机)[：:\s]*(1[3-9]\d{9})', '手机号'),
+            (r'(?:银行卡号|卡号|银行账号|银行卡)[：:\s]*([\d\s]{10,})', '银行卡号'),
             (r'(?:开户行行号|联行号|行号)[：:\s]*(\d{12})', '联行号'),
-            (r'(?:开户行名称|开户行|银行)[：:\s]*([^\n]+)', '开户行'),
+            (r'(?:开户行名称|开户行|银行|开户银行)[：:\s]*([^\n\t,，]+)', '开户行'),
         ]
-
         for pattern, field in patterns:
             match = re.search(pattern, text)
             if match:
@@ -4815,12 +5101,162 @@ class SmartPasteDialog:
                 if field == '银行卡号':
                     value = re.sub(r'\s+', '', value)
                 data[field] = value
+        return data
 
-        if not data['姓名']:
-            messagebox.showwarning("提示", "未能识别到姓名，请检查输入格式", parent=self.dialog)
+    def _auto_fields(self, values):
+        """对没有表头的一行数据，根据特征自动识别字段"""
+        data = {k: '' for k in self.FIELD_ALIASES}
+        used = set()
+
+        for v in values:
+            v = v.strip()
+            if not v or v in used:
+                continue
+
+            # 身份证号
+            if re.match(r'^\d{17}[\dXx]$', v):
+                if not data['身份证号码']:
+                    data['身份证号码'] = v
+                    used.add(v)
+                continue
+
+            # 手机号
+            if re.match(r'^1[3-9]\d{9}$', v):
+                if not data['手机号']:
+                    data['手机号'] = v
+                    used.add(v)
+                continue
+
+            # 12 位联行号
+            if re.match(r'^\d{12}$', v):
+                if not data['联行号']:
+                    data['联行号'] = v
+                    used.add(v)
+                continue
+
+            # 银行卡号（13-19 位数字，允许空格）
+            card_clean = re.sub(r'\s+', '', v)
+            if re.match(r'^\d{13,19}$', card_clean):
+                if not data['银行卡号']:
+                    data['银行卡号'] = card_clean
+                    used.add(v)
+                continue
+
+            # 开户行（含常见银行关键词）
+            if re.search(r'银行|支行|分行|信用社', v):
+                if not data['开户行']:
+                    data['开户行'] = v
+                    used.add(v)
+                continue
+
+            # 姓名兜底：短中文/英文姓名，且不是纯数字
+            if not data['姓名'] and not v.isdigit() and 1 < len(v) <= 20:
+                data['姓名'] = v
+                used.add(v)
+                continue
+
+        return data
+
+    def _parse_lines(self, text):
+        """主解析逻辑，返回记录列表"""
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        records = []
+
+        if not lines:
+            return records
+
+        # 尝试按表格（制表符/多空格）解析
+        delimiter = None
+        first_line = lines[0]
+        if '\t' in first_line:
+            delimiter = '\t'
+        elif len(re.split(r' {2,}', first_line)) >= 2:
+            delimiter = r' {2,}'
+
+        if delimiter:
+            rows = [re.split(delimiter, ln) for ln in lines]
+            headers = rows[0]
+            # 判断第一行是不是表头
+            is_header = any(self._normalize_header(h) for h in headers) or \
+                        all(not re.match(r'^\d{17}[\dXx]$', h.strip()) and
+                            not re.match(r'^1[3-9]\d{9}$', h.strip()) for h in headers)
+
+            data_rows = rows[1:] if is_header else rows
+            field_map = None
+            if is_header:
+                field_map = {}
+                for idx, h in enumerate(headers):
+                    field = self._normalize_header(h)
+                    if field:
+                        field_map[idx] = field
+
+            for row in data_rows:
+                data = {k: '' for k in self.FIELD_ALIASES}
+                if field_map:
+                    for idx, field in field_map.items():
+                        if idx < len(row):
+                            val = row[idx].strip()
+                            if field == '银行卡号':
+                                val = re.sub(r'\s+', '', val)
+                            data[field] = val
+                else:
+                    data = self._auto_fields(row)
+
+                if data['姓名'] or data['身份证号码']:
+                    records.append(data)
+            return records
+
+        # 非表格文本：逐段识别（空行分隔 or 标签化）
+        chunks = []
+        current = []
+        for ln in lines:
+            # 遇到明显的下一条开始（新一行的姓名开头）或空行则分段
+            if not current or re.search(r'姓名[：:\s]|^[^\d]{1,4}\s+\d{17}', ln):
+                if current:
+                    chunks.append('\n'.join(current))
+                current = [ln]
+            else:
+                current.append(ln)
+        if current:
+            chunks.append('\n'.join(current))
+
+        for chunk in chunks:
+            data = self._extract_by_pattern(chunk)
+            # 如果没识别到姓名但行很短，可能只有一行纯数据，再自动识别
+            if not data['姓名'] and '\n' not in chunk:
+                data = self._auto_fields(re.split(r'[\s,，]+', chunk))
+            if data['姓名'] or data['身份证号码']:
+                records.append(data)
+
+        return records
+
+    def parse_text(self):
+        """解析文本并显示结果"""
+        text = self.text_input.get("1.0", 'end').strip()
+        if not text:
+            messagebox.showwarning("提示", "请输入内容", parent=self.dialog)
             return
 
-        self.parsed_data = data
+        records = self._parse_lines(text)
+        self.parsed_data_list = records
+
+        self.result_text.config(state='normal')
+        self.result_text.delete('1.0', 'end')
+
+        if not records:
+            self.result_text.insert('end', "未能识别到有效员工信息，请检查输入格式。\n")
+        else:
+            for i, data in enumerate(records, 1):
+                self.result_text.insert('end', f"第{i}条: {data['姓名']} | {data['身份证号码']} | {data['手机号']} | "
+                                                f"{data['银行卡号']} | {data['联行号']} | {data['开户行']}\n")
+
+        self.result_text.config(state='disabled')
+
+    def save_parsed(self):
+        """确认并保存识别结果"""
+        if not self.parsed_data_list:
+            messagebox.showwarning("提示", "请先点击「智能解析」识别内容", parent=self.dialog)
+            return
         self.dialog.destroy()
 
 

@@ -6,7 +6,7 @@
 
 ### 智能化工资管理解决方案
 
-[![版本](https://img.shields.io/badge/版本-v2.5-blue.svg)](https://github.com)
+[![版本](https://img.shields.io/badge/版本-v2.6-blue.svg)](https://github.com)
 [![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 [![平台](https://img.shields.io/badge/平台-Windows-lightgrey.svg)](https://microsoft.com)
 [![许可证](https://img.shields.io/badge/许可证-MIT-yellow.svg)](LICENSE)
@@ -84,7 +84,7 @@ python salary_tool_feishu.py
 
 ### 方式一：使用安装包（推荐）
 
-下载 `工资报表生成工具_v2.5_安装包.exe`，双击运行：
+下载 `工资报表生成工具_v2.6_安装包.exe`，双击运行：
 - 自动创建桌面快捷方式
 - 自动创建开始菜单快捷方式
 - 支持卸载功能
@@ -273,7 +273,7 @@ python create_installer.py
 ## 🏗️ 项目结构
 
 ```
-工资工具_v2.5/
+工资工具_v2.6/
 ├── 📄 salary_tool_feishu.py           # 主程序源码
 ├── 📄 create_installer.py             # 打包脚本
 ├── 📄 setup.iss                       # Inno Setup 脚本
@@ -337,7 +337,7 @@ python create_installer.py
 ## 📦 安装与卸载
 
 ### 安装
-1. 下载 `工资报表生成工具_v2.5_安装包.exe`
+1. 下载 `工资报表生成工具_v2.6_安装包.exe`
 2. 双击运行安装程序
 3. 选择安装目录（默认：Program Files）
 4. 可选创建桌面快捷方式
@@ -356,6 +356,12 @@ python create_installer.py
 ---
 
 ## 📝 更新日志
+
+### v2.6 (2026-08-11)
+- ✅ **必填项校验**：姓名、身份证号、手机号设为必填项，禁止空身份证录入
+- 🔧 **手机号校验**：改用正则 `^1[3-9]\d{9}$` 严格校验
+- 🔧 **联行号修复**：修正联行号前导零被 `lstrip('0')` 截断的高风险问题
+- 📁 **目录迁移**：数据库文件与导出报表目录改为保存到桌面，规避 Program Files 无写权限
 
 ### v2.5 (2026-03-27)
 - 🐛 **Bug修复**：修复数据库删除员工时未记录到删除记录表的问题
